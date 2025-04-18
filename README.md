@@ -98,7 +98,7 @@ This app requires an OpenAI API key to function.
 
 ## Credits
 
-This project was inspired by and based on the code available at [https://github.com/knowsuchagency/pdf-to-podcast](https://github.com/knowsuchagency/pdf-to-podcast) and [https://github.com/knowsuchagency/promptic](https://github.com/knowsuchagency/promptic). 
+This project was inspired by and is based on the code available at [https://github.com/knowsuchagency/pdf-to-podcast](https://github.com/knowsuchagency/pdf-to-podcast) and [https://github.com/knowsuchagency/promptic](https://github.com/knowsuchagency/promptic). 
 
 ```bibtex
 @article{ghafarollahi2024sciagentsautomatingscientificdiscovery,

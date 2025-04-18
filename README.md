@@ -1,4 +1,4 @@
-# PDF to Audio Converter
+# Convert any document into an audio podcast, lecture, summary and others
 
 This code can be used to convert PDFs into audio podcasts, lectures, summaries, and more. It uses OpenAI's GPT models for text generation and text-to-speech conversion. You can also edit a draft transcript (multiple times) and provide specific comments, or overall directives on how it could be adapted or improved. 
 

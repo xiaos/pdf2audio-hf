@@ -33,7 +33,7 @@ def read_readme():
 INSTRUCTION_TEMPLATES = {
 ################# PODCAST ##################
     "podcast": {
-        "intro": """Your task is to take the input text provided and turn it into an lively, engaging, informative podcast dialogue, in the style of NPR. The input text may be messy or unstructured, as it could come from a variety of sources like PDFs or web pages. 
+        "intro": """Your task is to take the input text provided and turn it into an lively, engaging, informative podcast dialogue, in the style of NPR. Do not use or make up names. The input text may be messy or unstructured, as it could come from a variety of sources like PDFs or web pages. 
 
 Don't worry about the formatting issues or any irrelevant information; your goal is to extract the key points, identify definitions, and interesting facts that could be discussed in a podcast. 
 
@@ -389,7 +389,7 @@ O podcast deve ter cerca de 20.000 palavras.
 पॉडकास्ट में लगभग 20,000 शब्द होने चाहिए।
 """,
     },
-    
+
 ################# PODCAST Chinese ##################
 "podcast (Chinese)": {
     "intro": """你的任务是将提供的输入文本转变为一个生动、有趣、信息丰富的播客对话，风格类似NPR。输入文本可能是凌乱的或未结构化的，因为它可能来自PDF或网页等各种来源。
@@ -456,20 +456,39 @@ from tenacity import retry, retry_if_exception_type
 
 # Define standard values
 STANDARD_TEXT_MODELS = [
+    "o1-2024-12-17",
     "o1-preview-2024-09-12",
     "o1-preview",
-    "gpt-4o-2024-08-06",
-    "gpt-4o-mini",
+    "o1-pro",
     "o1-mini-2024-09-12",
     "o1-mini",
+    "o3-mini",
+    "o3-mini-2025-01-31",
+    "o3",
+    "o4-mini",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4o-2024-08-06",
+    "gpt-4o",
+    "gpt-4o-mini-2024-07-18",
+    "gpt-4o-mini",
     "chatgpt-4o-latest",
     "gpt-4-turbo",
     "openai/custom_model",
 ]
 
+REASONING_EFFORTS = [
+    "N/A",
+    "low",
+    "medium",
+    "high",
+]
+
+
 STANDARD_AUDIO_MODELS = [
     "tts-1",
     "tts-1-hd",
+    "gpt-4o-mini-tts",
 ]
 
 STANDARD_VOICES = [
@@ -479,6 +498,12 @@ STANDARD_VOICES = [
     "onyx",
     "nova",
     "shimmer",
+    "sage",
+    "ash",
+    "ballad",
+    "coral",
+    "nova",
+    
 ]
 
 class DialogueItem(BaseModel):
@@ -488,7 +513,7 @@ class DialogueItem(BaseModel):
 class Dialogue(BaseModel):
     scratchpad: str
     dialogue: List[DialogueItem]
-
+'''
 def get_mp3(text: str, voice: str, audio_model: str, api_key: str = None) -> bytes:
     client = OpenAI(
         api_key=api_key or os.getenv("OPENAI_API_KEY"),
@@ -503,30 +528,57 @@ def get_mp3(text: str, voice: str, audio_model: str, api_key: str = None) -> byt
             for chunk in response.iter_bytes():
                 file.write(chunk)
             return file.getvalue()
+'''
+def get_mp3(text: str, voice: str, audio_model: str, api_key: str = None,
+           speaker_instructions: str ='Speak in an emotive and friendly tone.') -> bytes:
+    client = OpenAI(
+        api_key=api_key or os.getenv("OPENAI_API_KEY"),
+    )
+
+     
+    with client.audio.speech.with_streaming_response.create(
+        model=audio_model,
+        voice=voice,
+        input=text,
+        instructions=speaker_instructions,
+    ) as response:
+        with io.BytesIO() as file:
+            for chunk in response.iter_bytes():
+                file.write(chunk)
+            return file.getvalue()
+
 
 
 from functools import wraps
 
-def conditional_llm(model, api_base=None, api_key=None):
+def conditional_llm(model, api_base=None, api_key=None, reasoning_effort="N/A"):
     """
     Conditionally apply the @llm decorator based on the api_base parameter.
     If api_base is provided, it applies the @llm decorator with api_base.
     Otherwise, it applies the @llm decorator without api_base.
     """
+    
     def decorator(func):
         if api_base:
-            return llm(model=model, api_base=api_base)(func)
+            return llm(model=model, api_base=api_base, )(func)
         else:
-            return llm(model=model, api_key=api_key)(func)
+            if reasoning_effort=="N/A":
+                return llm(model=model, api_key=api_key, )(func)
+            else:
+                return llm(model=model, api_key=api_key, reasoning_effort=reasoning_effort)(func)
+            
     return decorator
 
 def generate_audio(
     files: list,
     openai_api_key: str = None,
-    text_model: str = "o1-preview-2024-09-12",
+    text_model: str = "o4-mini", #o1-2024-12-17", #"o1-preview-2024-09-12",
+    reasoning_effort: str = "N/A",
     audio_model: str = "tts-1",
     speaker_1_voice: str = "alloy",
     speaker_2_voice: str = "echo",
+    speaker_1_instructions: str = '',
+    speaker_2_instructions: str = '',
     api_base: str = None,
     intro_instructions: str = '',
     text_instructions: str = '',
@@ -545,13 +597,31 @@ def generate_audio(
     combined_text = original_text or ""
 
     # If there's no original text, extract it from the uploaded files
+    '''
     if not combined_text:
         for file in files:
             with Path(file).open("rb") as f:
                 reader = PdfReader(f)
                 text = "\n\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
                 combined_text += text + "\n\n"
+    '''
 
+    if not combined_text:
+        for file in files:
+            file_path = Path(file)
+            suffix = file_path.suffix.lower()
+    
+            if suffix == ".pdf":
+                with file_path.open("rb") as f:
+                    reader = PdfReader(f)
+                    text = "\n\n".join(
+                        page.extract_text() for page in reader.pages if page.extract_text()
+                    )
+                    combined_text += text + "\n\n"
+            elif suffix in [".txt", ".md", ".mmd"]:
+                with file_path.open("r", encoding="utf-8") as f:
+                    text = f.read()
+                    combined_text += text + "\n\n"
     # Configure the LLM based on selected model and api_base
     @retry(retry=retry_if_exception_type(ValidationError))
     @conditional_llm(model=text_model, api_base=api_base, api_key=openai_api_key)
@@ -614,7 +684,8 @@ def generate_audio(
         for line in llm_output.dialogue:
             transcript_line = f"{line.speaker}: {line.text}"
             voice = speaker_1_voice if line.speaker == "speaker-1" else speaker_2_voice
-            future = executor.submit(get_mp3, line.text, voice, audio_model, openai_api_key)
+            speaker_instructions=speaker_1_instructions if line.speaker == "speaker-1" else speaker_2_instructions
+            future = executor.submit(get_mp3, line.text, voice, audio_model, openai_api_key, speaker_instructions, )
             futures.append((future, transcript_line))
             characters += len(line.text)
 
@@ -647,7 +718,7 @@ def generate_audio(
 def validate_and_generate_audio(*args):
     files = args[0]
     if not files:
-        return None, None, None, "Please upload at least one PDF file before generating audio."
+        return None, None, None, "Please upload at least one PDF (or MD/MMD/TXT) file before generating audio."
     try:
         audio_file, transcript, original_text = generate_audio(*args)
         return audio_file, transcript, original_text, None  # Return None as the error when successful
@@ -701,7 +772,7 @@ with gr.Blocks(title="PDF to Audio", css="""
     
     with gr.Row(elem_id="header"):
         with gr.Column(scale=4):
-            gr.Markdown("# Convert PDFs into an audio podcast, lecture, summary and others\n\nFirst, upload one or more PDFs, select options, then push Generate Audio.\n\nYou can also select a variety of custom option and direct the way the result is generated.", elem_id="title")
+            gr.Markdown("# Convert any document into an audio podcast, lecture, summary and others\n\nFirst, upload one or more PDFs, markup or other files, select options, then push Generate Audio.\n\nYou can also select a variety of custom option and direct the way the result is generated.", elem_id="title")
         with gr.Column(scale=1):
             gr.HTML('''
                 <div id="logo_container">
@@ -713,7 +784,7 @@ with gr.Blocks(title="PDF to Audio", css="""
 
     with gr.Row(elem_id="main_container"):
         with gr.Column(scale=2):
-            files = gr.Files(label="PDFs", file_types=["pdf"], )
+            files = gr.Files(label="PDFs (.pdf), markdown (.md, .mmd), or text files (.txt)", file_types=[".pdf", ".PDF", ".md", ".mmd", ".txt"], )
             
             openai_api_key = gr.Textbox(
                 label="OpenAI API Key",
@@ -724,9 +795,16 @@ with gr.Blocks(title="PDF to Audio", css="""
             text_model = gr.Dropdown(
                 label="Text Generation Model",
                 choices=STANDARD_TEXT_MODELS,
-                value="o1-preview-2024-09-12", #"gpt-4o-mini",
+                value="o3-mini", #"o4-mini", #"o1-preview-2024-09-12", #"gpt-4o-mini",
                 info="Select the model to generate the dialogue text.",
             )
+            reasoning_effort = gr.Dropdown(
+                label="Reasoning effort (for reasoning models, e.g. o1, o3, o4)",
+                choices=REASONING_EFFORTS,
+                value="N/A", #standard selection for non-reasoning models
+                info="Select reasoning effort used.",
+            )
+            
             audio_model = gr.Dropdown(
                 label="Audio Generation Model",
                 choices=STANDARD_AUDIO_MODELS,
@@ -745,6 +823,20 @@ with gr.Blocks(title="PDF to Audio", css="""
                 value="echo",
                 info="Select the voice for Speaker 2.",
             )
+            speaker_1_instructions = gr.Textbox(
+                label="Speaker 1 instructions",
+                value="Speak in an emotive and friendly tone.",
+                info="Speaker 1 instructions (used with gpt-4o-mini-tts only)",
+                interactive=True,
+            )
+
+            speaker_2_instructions = gr.Textbox(
+                label="Speaker 2 instructions",
+                value="Speak in a friendly, but serious tone.",
+                info="Speaker 2 instructions (used with gpt-4o-mini-tts only)",
+                interactive=True,
+            )
+            
             api_base = gr.Textbox(
                 label="Custom API Base",
                 placeholder="Enter custom API base URL if using a custom/local model...",
@@ -822,8 +914,9 @@ with gr.Blocks(title="PDF to Audio", css="""
     submit_btn.click(
         fn=validate_and_generate_audio,
         inputs=[
-            files, openai_api_key, text_model, audio_model, 
-            speaker_1_voice, speaker_2_voice, api_base,
+            files, openai_api_key, text_model, reasoning_effort, audio_model, 
+            speaker_1_voice, speaker_2_voice, speaker_1_instructions, speaker_2_instructions,
+            api_base,
             intro_instructions, text_instructions, scratch_pad_instructions, 
             prelude_dialog, podcast_dialog_instructions, 
             edited_transcript,  # placeholder for edited_transcript
@@ -851,8 +944,9 @@ with gr.Blocks(title="PDF to Audio", css="""
         ),
         inputs=[
             use_edited_transcript, edited_transcript,
-            files, openai_api_key, text_model, audio_model, 
-            speaker_1_voice, speaker_2_voice, api_base,
+            files, openai_api_key, text_model, reasoning_effort, audio_model, 
+            speaker_1_voice, speaker_2_voice, speaker_1_instructions, speaker_2_instructions,
+            api_base,
             intro_instructions, text_instructions, scratch_pad_instructions, 
             prelude_dialog, podcast_dialog_instructions,
             user_feedback, original_text_output
@@ -876,8 +970,10 @@ with gr.Blocks(title="PDF to Audio", css="""
     gr.Markdown(read_readme())
     
 # Enable queueing for better performance
-demo.queue(max_size=20, default_concurrency_limit=32)
+#demo.queue(max_size=20, default_concurrency_limit=32)
 
 # Launch the Gradio app
-if __name__ == "__main__":
-    demo.launch()
+#if __name__ == "__main__":
+#    demo.launch(share=True)
+
+demo.launch()

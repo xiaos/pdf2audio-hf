@@ -529,23 +529,66 @@ def get_mp3(text: str, voice: str, audio_model: str, api_key: str = None) -> byt
                 file.write(chunk)
             return file.getvalue()
 '''
+def chunk_text_by_sentences(text: str, max_chars: int = 4000) -> List[str]:
+    """Split text into chunks that don't exceed max_chars, preferring sentence boundaries."""
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    # Split by sentences first
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    
+    current_chunk = ""
+    for sentence in sentences:
+        # If adding this sentence would exceed the limit
+        if len(current_chunk) + len(sentence) > max_chars:
+            if current_chunk:  # Save current chunk if it has content
+                chunks.append(current_chunk.strip())
+                current_chunk = sentence
+            else:  # Single sentence is too long, split it by words
+                words = sentence.split()
+                for word in words:
+                    if len(current_chunk) + len(word) + 1 > max_chars:
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                            current_chunk = word
+                        else:  # Single word is too long, truncate it
+                            chunks.append(word[:max_chars])
+                            current_chunk = ""
+                    else:
+                        current_chunk += (" " + word) if current_chunk else word
+        else:
+            current_chunk += (" " + sentence) if current_chunk else sentence
+    
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
 def get_mp3(text: str, voice: str, audio_model: str, api_key: str = None,
            speaker_instructions: str ='Speak in an emotive and friendly tone.') -> bytes:
     client = OpenAI(
         api_key=api_key or os.getenv("OPENAI_API_KEY"),
     )
-
-     
-    with client.audio.speech.with_streaming_response.create(
-        model=audio_model,
-        voice=voice,
-        input=text,
-        instructions=speaker_instructions,
-    ) as response:
-        with io.BytesIO() as file:
-            for chunk in response.iter_bytes():
-                file.write(chunk)
-            return file.getvalue()
+    
+    # Split text into chunks if it's too long
+    text_chunks = chunk_text_by_sentences(text, max_chars=4000)  # Leave some buffer
+    
+    audio_data = b""
+    
+    for chunk in text_chunks:
+        with client.audio.speech.with_streaming_response.create(
+            model=audio_model,
+            voice=voice,
+            input=chunk,
+            instructions=speaker_instructions,
+        ) as response:
+            with io.BytesIO() as file:
+                for audio_chunk in response.iter_bytes():
+                    file.write(audio_chunk)
+                audio_data += file.getvalue()
+    
+    return audio_data
 
 
 

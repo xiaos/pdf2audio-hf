@@ -531,15 +531,19 @@ O podcast deve ter cerca de 20.000 palavras.
 STANDARD_TEXT_MODELS = [
     "gpt-4o",
     "gpt-4o-mini",
+    "gpt-4o-2024-11-20",
     "gpt-4o-2024-08-06",
     "gpt-4o-mini-2024-07-18",
     "chatgpt-4o-latest",
     "gpt-4-turbo",
+    "gpt-4-turbo-2024-04-09",
+    "o1",
     "o1-2024-12-17",
-    "o1-preview-2024-09-12",
     "o1-preview",
-    "o1-mini-2024-09-12",
+    "o1-preview-2024-09-12",
     "o1-mini",
+    "o1-mini-2024-09-12",
+    "o3-mini",
     "openai/custom_model",
 ]
 

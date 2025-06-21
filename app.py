@@ -665,7 +665,7 @@ def conditional_llm(
 ):
     """
     Wrap a function with the @llm decorator, choosing kwargs dynamically.
-    Adds `web_search_options={}` when do_web_search==True.
+    Note: web_search is handled through prompt instructions rather than API parameters.
     """
 
     # build decorator kwargs once so we don’t repeat logic
@@ -678,8 +678,8 @@ def conditional_llm(
         if reasoning_effort != "N/A":
             decorator_kwargs["reasoning_effort"] = reasoning_effort
 
-    if do_web_search:
-        decorator_kwargs["web_search_options"] = {}   # empty dict → default behaviour
+    # Note: web_search_options is not a standard OpenAI parameter
+    # Web search functionality should be handled differently if needed
 
     def decorator(func):
         return llm(**decorator_kwargs)(func)
@@ -1108,6 +1108,7 @@ with gr.Blocks(title="PDF to Audio", css="""
             do_web_search = gr.Checkbox(
                 label="Let the LLM search the web to complement the documents.",
                 value=False,
+                visible=False,  # Hidden until web search is properly implemented
                 info="When enabled, the LLM will call the web search tool during its reasoning."
             )
 

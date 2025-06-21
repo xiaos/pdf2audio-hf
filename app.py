@@ -16,7 +16,16 @@ from pydantic import BaseModel, ValidationError
 from pypdf import PdfReader
 from tenacity import retry, retry_if_exception_type
 
+from functools import wraps
+
 import re
+
+# Enable LiteLLM debug mode for troubleshooting
+try:
+    import litellm
+    litellm.set_verbose = True
+except ImportError:
+    pass
 
 def read_readme():
     readme_path = Path("README.md")
@@ -31,6 +40,7 @@ def read_readme():
         
 # Define multiple sets of instruction templates
 INSTRUCTION_TEMPLATES = {
+
 ################# PODCAST ##################
     "podcast": {
         "intro": """Your task is to take the input text provided and turn it into an lively, engaging, informative podcast dialogue, in the style of NPR. Do not use or make up names. The input text may be messy or unstructured, as it could come from a variety of sources like PDFs or web pages. 
@@ -65,6 +75,96 @@ At the end of the dialogue, have the host and guest speakers naturally summarize
 The podcast should have around 20000 words.
 """,
     },
+    
+################# DEEP DATA ANALYSIS ##################
+    "deep research analysis": {
+    # 1) High‑level task description 
+    "intro": """You are a senior analyst who conducts deep research.
+    
+Your job is to turn the raw materials supplied below (PDF text, markdown, tables, figures or loose CSV/TXT files) into a **deep research report** that humans can read.
+
+The finished report must contain, in this exact order:
+
+1. **Metadata block** – start with the title/s, authors, publication years (as they are available). If not available, start by describing the types of raw materials you analyzed.  
+2. **Data extraction** – careful extraction of key data and quantitative information, presented as a carefully crafted narrative. For example, discuss the domain, industry, area of science. Define. all terms. 
+3. **Key insights** – interpretation of the results.  This must be comprehensive and include your thoughts and interpretation, and context. 
+4. **Examples** – pick a few examples to illustrate the key concepts (one or more). Use strong storytelling to show depth while making it broadly understandable.  
+5. **Strengths** – strengths of the results or data, paper or information in the raw materials. 
+6. **Weaknesses** – assess weaknesses of the document, paper or data. 
+7. **Relating to other fields** – relate the raw materials to other fields, historical results, contemperary work, or other significant concepts. Discuss the significance.
+8. **Open questions / action items** – what further analysis or experiments would you recommend?
+
+Keep the narrative clear and concise, suitable for a technically literate audience, with depth.  Do **not** reveal chain‑of‑thought; only present the final reasoning.""",
+
+    # 2) How to read / transform the source material
+    "text_instructions": """Carefully scan the input text for any data, insights, and so on.  
+If tables are broken across lines, reconstruct them logically to extract key insights.  
+
+Translate uncommon units to SI in parentheses, and explain.""",
+
+    # 3) Scratch‑pad / brainstorming (hidden from end‑user)
+    "scratch_pad": """Brainstorm here (hidden):  
+- Map each table to a clean DataFrame name.  
+- Decide which statistical measures are meaningful.  
+- Note any assumptions or gap‑filling you’ll need (e.g., missing column headers), uncertainties, issues with the data, and. soon.  
+When ready, compile the final report strictly following the template above.""",
+
+    # 4) Prelude that introduces the report proper
+    "prelude": """Below is the structured report based on the supplied raw data:""",
+
+    # 5) Main output instructions
+     "dialog": """Design your output to be read aloud -- it will be directly converted into audio. The presentation of materials should include 30,000 words.
+
+If you have equations, variables or other complex concepts, make sure to design your output so that it can be clearly rendered by a text-to-voice model. 
+
+There is only one speaker, you. Stay on topic and maintaining an engaging flow. 
+
+Write a clear, detailed, and well-prepared analysis and report as a single narrator.  Begin every paragraph with `speaker-1:`."""
+},
+
+
+################# CLEAN READ‑THROUGH ##################
+"clean rendering": {
+    # 1) What the model should do
+    "intro": """You are a careful narrator tasked with producing an **accurate, faithful rendering** of the supplied document so it can be read aloud.
+
+Your priorities are:
+• Preserve the original wording and ordering of the content.  
+• Remove anything that is clearly an artefact of page layout (page numbers, running headers/footers, line numbers, PDF crop marks, hyphen‑splits at line wraps).  
+• Keep mathematical symbols, equations and variable names intact, but read them in a way a TTS system can pronounce (e.g. “square root of”, “alpha sub i”).  
+• Do **not** add commentary, summaries, or extra explanations—just the cleaned text.  
+• Present everything in the **same sequence** as in the source.
+
+Output must be suitable for text‑to‑speech; begin every paragraph with `speaker-1:` and write as a single narrator.""",
+
+    # 2) How to cleanse the raw text
+    "text_instructions": """Scan the input for artefacts such as:
+
+- Stand‑alone page numbers or headers like “Page 12 of 30”  
+- Repeated footers, URLs or timestamps  
+- Manual hyphenation at line breaks (join split words)  
+- Broken tables or columns (flatten them into continuous sentences where possible)
+
+Strip these while keeping all legitimate content. Do **not** reorder paragraphs or sentences.""",
+
+    # 3) Hidden scratch‑pad for the model
+    "scratch_pad": """Brainstorm here (hidden):
+- Identify obvious header/footer patterns to delete.
+- Decide how to handle any malformed tables (e.g. read row‑by‑row).
+- Note any equations that need a spoken equivalent.
+After cleaning decisions are made, move on to generate the final narration.""",
+
+    # 4) Prelude before the narration starts
+    "prelude": """Below is the faithful narration of the provided document (cleaned of layout artefacts, otherwise unchanged):""",
+
+    # 5) Main output instructions
+    "dialog": """Design your output to be read aloud—no markup, no bracketed directions.  
+Only one speaker (`speaker-1:`).  
+Maintain original headings and paragraph breaks where they naturally occur in the source.  
+If an equation appears, read it in a TTS‑friendly style (e.g. `speaker-1: E equals m times c squared`)."""
+},
+
+
 ################# MATERIAL DISCOVERY SUMMARY ##################
     "SciAgents material discovery summary": {
         "intro": """Your task is to take the input text provided and turn it into a lively, engaging conversation between a professor and a student in a panel discussion that describes a new material. The professor acts like Richard Feynman, but you never mention the name.
@@ -426,54 +526,20 @@ O podcast deve ter cerca de 20.000 palavras.
     },
 }
 
-# Function to update instruction fields based on template selection
-def update_instructions(template):
-    return (
-        INSTRUCTION_TEMPLATES[template]["intro"],
-        INSTRUCTION_TEMPLATES[template]["text_instructions"],
-        INSTRUCTION_TEMPLATES[template]["scratch_pad"],
-        INSTRUCTION_TEMPLATES[template]["prelude"],
-        INSTRUCTION_TEMPLATES[template]["dialog"]
-           )
-
-import concurrent.futures as cf
-import glob
-import io
-import os
-import time
-from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import List, Literal
-
-import gradio as gr
-
-from loguru import logger
-from openai import OpenAI
-from promptic import llm
-from pydantic import BaseModel, ValidationError
-from pypdf import PdfReader
-from tenacity import retry, retry_if_exception_type
 
 # Define standard values
 STANDARD_TEXT_MODELS = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4o-2024-08-06",
+    "gpt-4o-mini-2024-07-18",
+    "chatgpt-4o-latest",
+    "gpt-4-turbo",
     "o1-2024-12-17",
     "o1-preview-2024-09-12",
     "o1-preview",
-    "o1-pro",
     "o1-mini-2024-09-12",
     "o1-mini",
-    "o3-mini",
-    "o3-mini-2025-01-31",
-    "o3",
-    "o4-mini",
-    "gpt-4.1",
-    "gpt-4.1-mini",
-    "gpt-4o-2024-08-06",
-    "gpt-4o",
-    "gpt-4o-mini-2024-07-18",
-    "gpt-4o-mini",
-    "chatgpt-4o-latest",
-    "gpt-4-turbo",
     "openai/custom_model",
 ]
 
@@ -506,6 +572,16 @@ STANDARD_VOICES = [
     
 ]
 
+# Function to update instruction fields based on template selection
+def update_instructions(template):
+    return (
+        INSTRUCTION_TEMPLATES[template]["intro"],
+        INSTRUCTION_TEMPLATES[template]["text_instructions"],
+        INSTRUCTION_TEMPLATES[template]["scratch_pad"],
+        INSTRUCTION_TEMPLATES[template]["prelude"],
+        INSTRUCTION_TEMPLATES[template]["dialog"]
+           )
+
 class DialogueItem(BaseModel):
     text: str
     speaker: Literal["speaker-1", "speaker-2"]
@@ -513,22 +589,8 @@ class DialogueItem(BaseModel):
 class Dialogue(BaseModel):
     scratchpad: str
     dialogue: List[DialogueItem]
-'''
-def get_mp3(text: str, voice: str, audio_model: str, api_key: str = None) -> bytes:
-    client = OpenAI(
-        api_key=api_key or os.getenv("OPENAI_API_KEY"),
-    )
 
-    with client.audio.speech.with_streaming_response.create(
-        model=audio_model,
-        voice=voice,
-        input=text,
-    ) as response:
-        with io.BytesIO() as file:
-            for chunk in response.iter_bytes():
-                file.write(chunk)
-            return file.getvalue()
-'''
+
 def chunk_text_by_sentences(text: str, max_chars: int = 4000) -> List[str]:
     """Split text into chunks that don't exceed max_chars, preferring sentence boundaries."""
     if len(text) <= max_chars:
@@ -590,33 +652,43 @@ def get_mp3(text: str, voice: str, audio_model: str, api_key: str = None,
     
     return audio_data
 
-
-
-from functools import wraps
-
-def conditional_llm(model, api_base=None, api_key=None, reasoning_effort="N/A"):
+def conditional_llm(
+    model,
+    api_base=None,
+    api_key=None,
+    reasoning_effort="N/A",
+    do_web_search=False,         
+):
     """
-    Conditionally apply the @llm decorator based on the api_base parameter.
-    If api_base is provided, it applies the @llm decorator with api_base.
-    Otherwise, it applies the @llm decorator without api_base.
+    Wrap a function with the @llm decorator, choosing kwargs dynamically.
+    Adds `web_search_options={}` when do_web_search==True.
     """
-    
+
+    # build decorator kwargs once so we don’t repeat logic
+    decorator_kwargs = {"model": model}
+
+    if api_base:
+        decorator_kwargs["api_base"] = api_base
+    else:
+        decorator_kwargs["api_key"] = api_key
+        if reasoning_effort != "N/A":
+            decorator_kwargs["reasoning_effort"] = reasoning_effort
+
+    if do_web_search:
+        decorator_kwargs["web_search_options"] = {}   # empty dict → default behaviour
+
     def decorator(func):
-        if api_base:
-            return llm(model=model, api_base=api_base, )(func)
-        else:
-            if reasoning_effort=="N/A":
-                return llm(model=model, api_key=api_key, )(func)
-            else:
-                return llm(model=model, api_key=api_key, reasoning_effort=reasoning_effort)(func)
-            
+        return llm(**decorator_kwargs)(func)
+
     return decorator
+
 
 def generate_audio(
     files: list,
     openai_api_key: str = None,
-    text_model: str = "o4-mini", #o1-2024-12-17", #"o1-preview-2024-09-12",
+    text_model: str = "gpt-4o-mini", #o1-2024-12-17", #"o1-preview-2024-09-12",
     reasoning_effort: str = "N/A",
+    do_web_search: bool = False, 
     audio_model: str = "tts-1",
     speaker_1_voice: str = "alloy",
     speaker_2_voice: str = "echo",
@@ -633,21 +705,18 @@ def generate_audio(
     original_text: str = None,
     debug = False,
 ) -> tuple:
+
+    print(f"🔑 Checking API keys... ENV: {bool(os.getenv('OPENAI_API_KEY'))}, Provided: {bool(openai_api_key)}")
+    
     # Validate API Key
     if not os.getenv("OPENAI_API_KEY") and not openai_api_key:
+        print("❌ No OpenAI API key found")
         raise gr.Error("OpenAI API key is required")
 
     combined_text = original_text or ""
 
     # If there's no original text, extract it from the uploaded files
-    '''
-    if not combined_text:
-        for file in files:
-            with Path(file).open("rb") as f:
-                reader = PdfReader(f)
-                text = "\n\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-                combined_text += text + "\n\n"
-    '''
+     
 
     if not combined_text:
         for file in files:
@@ -667,7 +736,14 @@ def generate_audio(
                     combined_text += text + "\n\n"
     # Configure the LLM based on selected model and api_base
     @retry(retry=retry_if_exception_type(ValidationError))
-    @conditional_llm(model=text_model, api_base=api_base, api_key=openai_api_key)
+    #@conditional_llm(model=text_model, api_base=api_base, api_key=openai_api_key)
+    @conditional_llm(
+            model=text_model,
+            api_base=api_base,
+            api_key=openai_api_key,
+            reasoning_effort=reasoning_effort,
+            do_web_search=do_web_search,           
+        )
     def generate_dialogue(text: str, intro_instructions: str, text_instructions: str, scratch_pad_instructions: str, 
                           prelude_dialog: str, podcast_dialog_instructions: str,
                           edited_transcript: str = None, user_feedback: str = None, ) -> Dialogue:
@@ -746,6 +822,7 @@ def generate_audio(
     temporary_file = NamedTemporaryFile(
         dir=temporary_directory,
         delete=False,
+        prefix="PDF2Audio_",
         suffix=".mp3",
     )
     temporary_file.write(audio)
@@ -756,18 +833,32 @@ def generate_audio(
         if os.path.isfile(file) and time.time() - os.path.getmtime(file) > 24 * 60 * 60:
             os.remove(file)
 
-    return temporary_file.name, transcript, combined_text
+    return temporary_file.name, transcript, combined_text, llm_output
 
 def validate_and_generate_audio(*args):
+    print(f"🔧 validate_and_generate_audio called with {len(args)} arguments")
     files = args[0]
+    print(f"📁 Files received: {files}")
+    
     if not files:
+        print("❌ No files provided")
         return None, None, None, "Please upload at least one PDF (or MD/MMD/TXT) file before generating audio."
+    
     try:
-        audio_file, transcript, original_text = generate_audio(*args)
-        return audio_file, transcript, original_text, None  # Return None as the error when successful
+        print("🚀 Starting audio generation...")
+        #audio_file, transcript, original_text = generate_audio(*args)
+        audio_file, transcript, original_text, dialogue = generate_audio(*args)
+        print(f"✅ Audio generation completed. Audio file: {audio_file}")
+        print(f"📄 Transcript length: {len(transcript) if transcript else 0}")
+        return audio_file, transcript, original_text, None, dialogue  #  
     except Exception as e:
-        # If an error occurs during generation, return None for the outputs and the error message
-        return None, None, None, str(e)
+        print(f"💥 Error in validate_and_generate_audio: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None, str(e), None  #  
+
+
+        
 
 def edit_and_regenerate(edited_transcript, user_feedback, *args):
     # Replace the original transcript and feedback in the args with the new ones
@@ -783,6 +874,128 @@ def process_feedback_and_regenerate(feedback, *args):
     new_args.append(feedback)  # Add user feedback as a new argument
     return validate_and_generate_audio(*new_args)
 
+
+####################################################
+#Download dialog/result as markdown 
+####################################################
+
+def dialogue_to_markdown(dlg: Dialogue) -> str:
+    lines = []
+    lines.append("# PDF2Audio Transcript\n")
+    lines.append("## Transcript\n")
+    for item in dlg.dialogue:
+        lines.append(f"**{item.speaker}:** {item.text.strip()}\n")
+    return "\n".join(lines)
+
+def save_dialogue_as_markdown(cached_dialogue) -> str:
+    if cached_dialogue is None:
+        raise gr.Error("No dialogue to save. Please generate or edit a dialogue first.")
+
+    markdown_text = dialogue_to_markdown(cached_dialogue)
+
+    # Write to a temporary .md file
+    temp_dir = "./gradio_cached_examples/tmp/"
+    os.makedirs(temp_dir, exist_ok=True)
+
+    file_path = os.path.join(temp_dir, f"PDF2Audio_dialogue_{int(time.time())}.md")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(markdown_text)
+
+    return file_path
+
+
+
+####################################################
+#Edit and re-render audio from existing LLM output
+####################################################
+
+import pandas as pd
+from typing import List
+
+def dialogue_to_df(dlg: Dialogue) -> pd.DataFrame:
+    data = [{"Speaker": item.speaker, "Line": item.text} for item in dlg.dialogue]
+    return pd.DataFrame(data)
+
+def df_to_dialogue(df: pd.DataFrame, scratchpad: str = "") -> Dialogue:
+    items: List[DialogueItem] = [
+        DialogueItem(speaker=row["Speaker"], text=row["Line"])
+        for _, row in df.iterrows()
+    ]
+    return Dialogue(scratchpad=scratchpad, dialogue=items)
+
+def save_dialogue_edits(df, cached_dialogue):
+    """
+    Save the edited dialogue and update the per-session cached state.
+    """
+    if cached_dialogue is None:
+        raise gr.Error("Nothing to edit yet – run Generate Audio first.")
+
+    import pandas as pd
+    new_dlg = df_to_dialogue(pd.DataFrame(df, columns=["Speaker", "Line"]))
+
+    # regenerate plain transcript so the user sees the change immediately
+    transcript_str = "\n".join(f"{d.speaker}: {d.text}" for d in new_dlg.dialogue)
+
+    # Return updated state and transcript
+    return new_dlg, gr.update(value=transcript_str), "Edits saved. Press *Re‑render* to hear them."
+
+
+def render_audio_from_dialogue(
+    cached_dialogue,                          # 👈 NEW: pass in as argument
+    openai_api_key: str,
+    audio_model: str,
+    speaker_1_voice: str,
+    speaker_2_voice: str,
+    speaker_1_instructions: str,
+    speaker_2_instructions: str,
+) -> tuple[str, str]:  # mp3 file path, transcript
+
+    if cached_dialogue is None:
+        raise gr.Error("Nothing to re‑render yet – run Generate Audio first.")
+
+    dlg = cached_dialogue
+    audio_bytes, transcript, characters = b"", "", 0
+
+    with cf.ThreadPoolExecutor() as ex:
+        futures = []
+        for item in dlg.dialogue:
+            voice = speaker_1_voice if item.speaker == "speaker-1" else speaker_2_voice
+            instr = speaker_1_instructions if item.speaker == "speaker-1" else speaker_2_instructions
+            futures.append(
+                (
+                    ex.submit(get_mp3, item.text, voice, audio_model, openai_api_key, instr),
+                    f"{item.speaker}: {item.text}",
+                )
+            )
+            characters += len(item.text)
+
+        for fut, line in futures:
+            audio_bytes += fut.result()
+            transcript += line + "\n\n"
+
+    logger.info(f"[Re‑render] {characters} characters voiced")
+
+    # Write to temporary .mp3 file
+    temporary_directory = "./gradio_cached_examples/tmp/"
+    os.makedirs(temporary_directory, exist_ok=True)
+
+    temporary_file = NamedTemporaryFile(
+        dir=temporary_directory,
+        delete=False,
+        prefix="PDF2Audio_",
+        suffix=".mp3",
+    )
+    temporary_file.write(audio_bytes)
+    temporary_file.close()
+
+    # Clean up old files
+    for file in glob.glob(f"{temporary_directory}*.mp3"):
+        if os.path.isfile(file) and time.time() - os.path.getmtime(file) > 24 * 60 * 60:
+            os.remove(file)
+
+    return temporary_file.name, transcript
+
+    
 with gr.Blocks(title="PDF to Audio", css="""
     #header {
         display: flex;
@@ -812,6 +1025,8 @@ with gr.Blocks(title="PDF to Audio", css="""
         margin-top: 20px;
     }
 """) as demo:
+
+    cached_dialogue = gr.State()
     
     with gr.Row(elem_id="header"):
         with gr.Column(scale=4):
@@ -838,7 +1053,7 @@ with gr.Blocks(title="PDF to Audio", css="""
             text_model = gr.Dropdown(
                 label="Text Generation Model",
                 choices=STANDARD_TEXT_MODELS,
-                value="o3-mini", #"o4-mini", #"o1-preview-2024-09-12", #"gpt-4o-mini",
+                value="gpt-4o-mini", #"o1-preview-2024-09-12", #"gpt-4o-mini",
                 info="Select the model to generate the dialogue text.",
             )
             reasoning_effort = gr.Dropdown(
@@ -886,6 +1101,12 @@ with gr.Blocks(title="PDF to Audio", css="""
                 info="If you are using a custom or local model, provide the API base URL here, e.g.: http://localhost:8080/v1 for llama.cpp REST server.",
             )
 
+            do_web_search = gr.Checkbox(
+                label="Let the LLM search the web to complement the documents.",
+                value=False,
+                info="When enabled, the LLM will call the web search tool during its reasoning."
+            )
+
         with gr.Column(scale=3):
             template_dropdown = gr.Dropdown(
                 label="Instruction Template",
@@ -926,7 +1147,7 @@ with gr.Blocks(title="PDF to Audio", css="""
             )
 
     audio_output = gr.Audio(label="Audio", format="mp3", interactive=False, autoplay=False)
-    transcript_output = gr.Textbox(label="Transcript", lines=20, show_copy_button=True)
+    transcript_output = gr.Textbox(label="Transcript", lines=25, show_copy_button=True)
     original_text_output = gr.Textbox(label="Original Text", lines=10, visible=False)
     error_output = gr.Textbox(visible=False)  # Hidden textbox to store error message
 
@@ -937,6 +1158,45 @@ with gr.Blocks(title="PDF to Audio", css="""
     user_feedback = gr.Textbox(label="Provide Feedback or Notes", lines=10, #placeholder="Enter your feedback or notes here..."
                               )
     regenerate_btn = gr.Button("Regenerate Audio with Edits and Feedback")
+
+    with gr.Accordion("Edit dialogue line‑by‑line", open=False) as editor_box:
+        df_editor = gr.Dataframe(
+            headers=["Speaker", "Line"],
+            datatype=["str", "str"],
+            wrap=True,
+            interactive=True,
+            row_count=(1, "dynamic"),
+            col_count=(2, "fixed"),
+        )
+
+        save_btn   = gr.Button("Save edits")
+        save_msg   = gr.Markdown()
+        
+
+    save_btn.click(
+        fn=save_dialogue_edits,
+        inputs=[df_editor, cached_dialogue],
+        outputs=[cached_dialogue, transcript_output, save_msg],
+    )
+        
+    rerender_btn = gr.Button("Re‑render with current voice settings (must have generated original LLM output)")
+    
+    rerender_btn.click(
+        fn=render_audio_from_dialogue,
+        inputs=[
+            cached_dialogue,
+            openai_api_key,
+            audio_model,
+            speaker_1_voice,
+            speaker_2_voice,
+            speaker_1_instructions,
+            speaker_2_instructions,
+        ],
+        outputs=[audio_output, transcript_output],
+    )
+
+
+    
     # Function to update the interactive state of edited_transcript
     def update_edit_box(checkbox_value):
         return gr.update(interactive=checkbox_value, lines=20 if checkbox_value else 20, visible=True if checkbox_value else False)
@@ -957,15 +1217,16 @@ with gr.Blocks(title="PDF to Audio", css="""
     submit_btn.click(
         fn=validate_and_generate_audio,
         inputs=[
-            files, openai_api_key, text_model, reasoning_effort, audio_model, 
+            files, openai_api_key, text_model, reasoning_effort, do_web_search, audio_model, 
             speaker_1_voice, speaker_2_voice, speaker_1_instructions, speaker_2_instructions,
             api_base,
             intro_instructions, text_instructions, scratch_pad_instructions, 
             prelude_dialog, podcast_dialog_instructions, 
-            edited_transcript,  # placeholder for edited_transcript
-            user_feedback,  # placeholder for user_feedback
+            edited_transcript,   
+            user_feedback,  
+            
         ],
-        outputs=[audio_output, transcript_output, original_text_output, error_output]
+        outputs=[audio_output, transcript_output, original_text_output, error_output, cached_dialogue, ]
     ).then(
         fn=lambda audio, transcript, original_text, error: (
             transcript if transcript else "",
@@ -977,7 +1238,11 @@ with gr.Blocks(title="PDF to Audio", css="""
         fn=lambda error: gr.Warning(error) if error else None,
         inputs=[error_output],
         outputs=[]
-    )
+    ).then(              # fill spreadsheet editor
+    fn=dialogue_to_df,
+        inputs=[cached_dialogue],          
+        outputs=[df_editor],
+     )
 
     regenerate_btn.click(
         fn=lambda use_edit, edit, *args: validate_and_generate_audio(
@@ -987,14 +1252,14 @@ with gr.Blocks(title="PDF to Audio", css="""
         ),
         inputs=[
             use_edited_transcript, edited_transcript,
-            files, openai_api_key, text_model, reasoning_effort, audio_model, 
+            files, openai_api_key, text_model, reasoning_effort, do_web_search, audio_model, 
             speaker_1_voice, speaker_2_voice, speaker_1_instructions, speaker_2_instructions,
             api_base,
             intro_instructions, text_instructions, scratch_pad_instructions, 
             prelude_dialog, podcast_dialog_instructions,
             user_feedback, original_text_output
         ],
-        outputs=[audio_output, transcript_output, original_text_output, error_output]
+        outputs=[audio_output, transcript_output, original_text_output, error_output, cached_dialogue, ]
     ).then(
         fn=lambda audio, transcript, original_text, error: (
             transcript if transcript else "",
@@ -1006,6 +1271,20 @@ with gr.Blocks(title="PDF to Audio", css="""
         fn=lambda error: gr.Warning(error) if error else None,
         inputs=[error_output],
         outputs=[]
+    ).then(                          # fill spreadsheet editor
+    fn=dialogue_to_df,
+        inputs=[cached_dialogue],          
+        outputs=[df_editor],
+     )
+
+    with gr.Row():
+        save_md_btn = gr.Button("Download Markdown of Dialogue")
+        markdown_file_output = gr.File(label="Download .md file")
+    
+    save_md_btn.click(
+        fn=save_dialogue_as_markdown,
+        inputs=[cached_dialogue],
+        outputs=[markdown_file_output],
     )
 
     # Add README content at the bottom
@@ -1013,10 +1292,10 @@ with gr.Blocks(title="PDF to Audio", css="""
     gr.Markdown(read_readme())
     
 # Enable queueing for better performance
-#demo.queue(max_size=20, default_concurrency_limit=32)
+demo.queue(max_size=20, default_concurrency_limit=32)
 
 # Launch the Gradio app
-#if __name__ == "__main__":
-#    demo.launch(share=True)
+if __name__ == "__main__":
+    demo.launch(share=True)
 
-demo.launch()
+#demo.launch()
